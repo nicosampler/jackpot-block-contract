@@ -4,10 +4,10 @@ import "@openzeppelin/contracts/token/ERC20/presets/ERC20PresetFixedSupply.sol";
 
 import "forge-std/Test.sol";
 
-import "../src/MyLuckyBlock.sol";
+import "../src/JackpotBlock.sol";
 
-contract MyLuckyBlockTest is Test {
-    MyLuckyBlock public lottery;
+contract JackpotBlockTest is Test {
+    JackpotBlock public jbContract;
     IERC20 public token;
     address admin;
     address donor;
@@ -39,7 +39,12 @@ contract MyLuckyBlockTest is Test {
         bettor8 = address(0x58);
         bettor9 = address(0x59);
 
-        token = new ERC20PresetFixedSupply("USDT", "USDT", 1000000 ether, admin);
+        token = new ERC20PresetFixedSupply(
+            "USDT",
+            "USDT",
+            1000000 ether,
+            admin
+        );
         vm.startPrank(admin);
         token.transfer(bettor0, 10000 ether);
         token.transfer(bettor1, 10000 ether);
@@ -63,7 +68,7 @@ contract MyLuckyBlockTest is Test {
 
         vm.roll(block.number - 100);
 
-        lottery = new MyLuckyBlock(
+        jbContract = new JackpotBlock(
             address(token),
             betPrice,
             blocksBetweenRound,
@@ -77,61 +82,62 @@ contract MyLuckyBlockTest is Test {
         uint256 amount = 1 ether;
 
         vm.prank(donor);
-        token.approve(address(lottery), amount);
+        token.approve(address(jbContract), amount);
         vm.prank(donor);
-        lottery.donate(amount);
+        jbContract.donate(amount);
 
-        assertEq(lottery.poolPrize(), amount);
+        assertEq(jbContract.poolPrize(), amount);
     }
 
     function testPlaceBetWithZeroAddress() public {
         uint24 betValue = 9999; // Asumiendo que 9999 es un valor válido de apuesta
 
         vm.prank(bettor1);
-        token.approve(address(lottery), 1 ether);
+        token.approve(address(jbContract), 1 ether);
 
-        vm.expectRevert(MyLuckyBlock.AddressZero.selector);
-        lottery.placeBet(betValue, address(0));
+        vm.expectRevert(JackpotBlock.AddressZero.selector);
+        jbContract.placeBet(betValue, address(0));
     }
 
     function testPlaceBetAfterTargetBlock() public {
-        vm.roll(lottery.targetBlock() + 1);
+        vm.roll(jbContract.targetBlock() + 1);
 
-        vm.expectRevert(MyLuckyBlock.BetIsClosed.selector);
+        vm.expectRevert(JackpotBlock.BetIsClosed.selector);
         vm.prank(bettor1);
-        lottery.placeBet(1234, bettor1);
+        jbContract.placeBet(1234, bettor1);
     }
 
     function testPlaceBetWithInvalidValue() public {
         uint24 bet = 10000;
 
-        vm.expectRevert(MyLuckyBlock.InvalidBetValue.selector);
-        lottery.placeBet(bet, donor);
+        vm.expectRevert(JackpotBlock.InvalidBetValue.selector);
+        jbContract.placeBet(bet, donor);
     }
 
     function testPlaceBetTransferFailed() public {
         vm.prank(bettor1);
-        token.approve(address(lottery), betPrice - 1);
+        token.approve(address(jbContract), betPrice - 1);
 
         vm.prank(bettor1);
         vm.expectRevert();
-        lottery.placeBet(642, bettor1);
+        jbContract.placeBet(642, bettor1);
     }
 
     function testPlaceBetSuccess() public {
-        uint256 initialPrizePool = lottery.poolPrize();
-        uint256 initialTotalFees = lottery.totalFees();
+        uint256 initialPrizePool = jbContract.poolPrize();
+        uint256 initialTotalFees = jbContract.totalFees();
 
         vm.prank(bettor1);
-        token.approve(address(lottery), betPrice);
+        token.approve(address(jbContract), betPrice);
         vm.prank(bettor1);
-        lottery.placeBet(6, bettor1);
+        jbContract.placeBet(6, bettor1);
 
-        uint256 betFee = (betPrice * lottery.BET_FEE()) / lottery.BASIS_POINTS();
+        uint256 betFee = (betPrice * jbContract.BET_FEE()) /
+            jbContract.BASIS_POINTS();
         uint256 betAmount = betPrice - betFee;
 
-        assertEq(lottery.poolPrize(), initialPrizePool + betAmount);
-        assertEq(lottery.totalFees(), initialTotalFees + betFee);
+        assertEq(jbContract.poolPrize(), initialPrizePool + betAmount);
+        assertEq(jbContract.totalFees(), initialTotalFees + betFee);
     }
 
     function testWinnersDistribution() public {
@@ -145,25 +151,25 @@ contract MyLuckyBlockTest is Test {
             uint24 betNumber = uint24(i); // each address bets its index
 
             vm.prank(bettor);
-            token.approve(address(lottery), betPrice);
-            lottery.placeBet(betNumber, bettor);
+            token.approve(address(jbContract), betPrice);
+            jbContract.placeBet(betNumber, bettor);
 
             initialBalances[i] = token.balanceOf(bettor);
         }
 
         // Fast-forward the blockchain to beyond the target block
-        vm.roll(lottery.targetBlock() + amountOfHashesToDetermineWinner + 2);
+        vm.roll(jbContract.targetBlock() + amountOfHashesToDetermineWinner + 2);
 
         // save data before resolving the lottery
-        targetBlock = lottery.targetBlock();
-        poolPrize = lottery.poolPrize();
+        targetBlock = jbContract.targetBlock();
+        poolPrize = jbContract.poolPrize();
 
         // Resolve the lottery
         vm.prank(donor);
-        lottery.resolveLottery();
+        jbContract.resolveLottery();
 
         // Log the winning number
-        uint24 winningNumber = lottery.getWinningNumber(targetBlock);
+        uint24 winningNumber = jbContract.getWinningNumber(targetBlock);
         emit log_string("Winner number");
         emit log_uint(winningNumber);
 
@@ -175,13 +181,15 @@ contract MyLuckyBlockTest is Test {
         }
 
         // Retrieve the winner based on the winning number
-        address winner = lottery.getBettors(targetBlock, winningNumber)[0];
+        address winner = jbContract.getBettors(targetBlock, winningNumber)[0];
         emit log_string("Winner address");
         emit log_address(winner);
 
         // Validate the token balance of the winner
         uint256 winnerInitialBalance = initialBalances[winningNumber];
-        uint256 winnerPrizeAmount = (poolPrize * lottery.FIRST_ROUND_WINNER_PERCENTAGE()) / lottery.BASIS_POINTS();
+        uint256 winnerPrizeAmount = (poolPrize *
+            jbContract.FIRST_ROUND_WINNER_PERCENTAGE()) /
+            jbContract.BASIS_POINTS();
 
         emit log_string("Winner price:");
         emit log_uint(winnerPrizeAmount);
@@ -199,11 +207,13 @@ contract MyLuckyBlockTest is Test {
         assertEq(token.balanceOf(winner), expectedFinalBalance);
 
         // Validate that the contract has been reset for the next round.
-        uint256 expectedPoolPrize = (poolPrize * (lottery.BASIS_POINTS() - lottery.FIRST_ROUND_WINNER_PERCENTAGE())) /
-            lottery.BASIS_POINTS();
-        assertEq(lottery.poolPrize(), expectedPoolPrize);
+        uint256 expectedPoolPrize = (poolPrize *
+            (jbContract.BASIS_POINTS() -
+                jbContract.FIRST_ROUND_WINNER_PERCENTAGE())) /
+            jbContract.BASIS_POINTS();
+        assertEq(jbContract.poolPrize(), expectedPoolPrize);
 
         emit log_string("Pool poolPriceer resolve:");
-        emit log_uint(lottery.poolPrize());
+        emit log_uint(jbContract.poolPrize());
     }
 }

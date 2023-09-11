@@ -1,0 +1,5 @@
+node_modules
+lib/openzeppelin-contracts
+lib/forge-std
+src/test
+**/artifacts
