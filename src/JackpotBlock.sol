@@ -3,30 +3,38 @@ pragma solidity ^0.8.17;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";x
+
+// TODO: manual withdrawals with expiry
+// TODO: set all configs in the same struct, create another if not all values can be changed
 
 // This contract represents a betting game where participants can bet on a winning number.
 // The winning number is calculated based on amountOfHashesToDetermineWinner block hashes in the future.
 contract JackpotBlock is Ownable, Pausable {
+    uint256 public constant BASIS_POINTS = 10000; // 10000 basis points = 100%
+
+    struct Config {
+        uint256 betPrice_nextRound; // Cost of a single bet for the next round
+        uint256 maxBetValue_nextRound; // Maximum allowed bet value for the next round (0-9, 0-99, ... 0-999999)
+        uint256 betFee_nextRound; // Fee for each bet in basis points for the next round
+        uint256 first_winner_percentage_nextRound; // percentage of the prize pool for the first winner for the next round
+        uint256 second_winner_percentage_nextRound; // percentage of the prize pool for the second winner for the next round
+    }
+
     // State variables
+    Config public config;
     address public betTokenAddress; // Address of the betting token
     uint256 public targetBlock; // Target block number to decide the round's winner.
     uint256 public poolPrize; // Prize pool in bet tokens
-    uint256 public blocksBetweenRound; // Number of blocks between each round
+    uint256 public blocksBetweenRounds; // Number of blocks between each round
     address public feeCollector; // Address that collects fees
     uint256 public totalFees; // Accumulated fees
     uint256 public maxBetValue; // Bet value for the current round
     uint256 public betPrice; // Cost of a single bet
     uint256 public amountOfHashesToDetermineWinner; // Amount of block hashes to use to determine the winner
     uint256 public betFee; // Fee for each bet in basis points
-
-    uint256 public betPriceForNextRound; // Cost of a single bet for the next round
-    uint256 public maxBetValueForNextRound; // Maximum allowed bet value for the next round (0-9, 0-99, ... 0-999999)
-    uint256 public betFeeForNextRound; // Fee for each bet in basis points for the next round
-
-    uint256 public constant BASIS_POINTS = 1000; // 1000 basis points = 100%
-    uint256 public constant FIRST_ROUND_WINNER_PERCENTAGE = 800; // 800 basis points = 80%
-    uint256 public constant SECOND_ROUND_WINNER_PERCENTAGE = 500; // 500 basis points = 50%
+    uint256 public first_winner_percentage; // percentage of the prize pool for the first winner
+    uint256 public second_winner_percentage; // percentage of the prize pool for the second winner
 
     // Keeps track of the block numbers for which bets have been placed.
     // blockNumber => betNumber => [bettor1, bettor2, ...]
@@ -39,10 +47,14 @@ contract JackpotBlock is Ownable, Pausable {
     mapping(uint256 => mapping(uint24 => mapping(address => bool))) public hasBet;
 
     // Events
-    event BetPlaced(address indexed bettor, address indexed onBehalfOf, uint256 blockNumber, uint24 bet);
-    event PrizeClaimed(uint256 attempt, uint256 winners, uint256 amount);
-    event DonationReceived(address indexed donor, uint256 amount);
-    event newConfig(uint256 maxBetValueForNextRound, uint256 betPriceForNextRound, uint256 betFeeForNextRound);
+    event Init(address betTokenAddress, uint256 blocksBetweenRounds, uint256 amountOfHashesToDetermineWinner);
+    event BetPlaced(address indexed sender, address indexed account, uint256 indexed targetBlock, uint24 bet);
+    event PrizeClaimed(uint256 attempt, uint256 winners, uint256 amount, uint256 indexed targetBlock);
+    event DonationReceived(address indexed donor, uint256 amount, uint256 indexed targetBlock);
+    event newConfig(Config config);
+    event NewRound(uint256 indexed prevTargetBlock, uint256 indexed targetBlock, Config config);
+    event feesClaimed(address feeCollector, uint256 totalFees);
+    event newFeesCollector(address feeCollector);
 
     // Custom errors
     error AddressZero();
@@ -51,38 +63,50 @@ contract JackpotBlock is Ownable, Pausable {
     error AlreadyProcessed();
     error CalledTooSoon();
     error TransferFailed();
-    error InvalidBetValue();
-    error maxBetValueNotAllowed();
+    error InvalidValue();
     error AlreadyBet();
 
     // Constructor
     constructor(
         address _betTokenAddress,
         uint256 _betPrice,
-        uint256 _blocksBetweenRound,
+        uint256 _blocksBetweenRounds,
         uint256 _amountOfHashesToDetermineWinner,
         uint256 _maxBetValue,
         address _feeCollector,
         uint256 _betFee
     ) {
-        targetBlock = block.number + _blocksBetweenRound;
+        if (_betTokenAddress == address(0)) revert AddressZero();
+        if (_betPrice == 0) revert ZeroAmountNotAllowed();
+        if (_amountOfHashesToDetermineWinner < 5) revert InvalidValue();
+        if (_blocksBetweenRounds < 1 + _amountOfHashesToDetermineWinner) revert InvalidValue();
+        if (_feeCollector == address(0)) revert AddressZero();
+
         betTokenAddress = _betTokenAddress;
-        blocksBetweenRound = _blocksBetweenRound;
+        blocksBetweenRounds = _blocksBetweenRounds;
+        amountOfHashesToDetermineWinner = _amountOfHashesToDetermineWinner;
         betPrice = _betPrice;
         feeCollector = _feeCollector;
         betFee = _betFee;
-        maxBetValueForNextRound = _maxBetValue; // Default max bet value
-        maxBetValue = _maxBetValue; // Default current bet value
-        amountOfHashesToDetermineWinner = _amountOfHashesToDetermineWinner;
+        first_winner_percentage = 8000;
+        second_winner_percentage = 4000;
+
+        targetBlock = block.number + _blocksBetweenRounds;
+
+        config = Config(_betPrice, _maxBetValue, _betFee, first_winner_percentage, second_winner_percentage);
+
+        emit Init(betTokenAddress, blocksBetweenRounds, amountOfHashesToDetermineWinner);
+        emit NewRound(0, targetBlock, config);
     }
 
     // Allows users to donate to the prize pool
+    // TODO: prevent if block.number < targetBlock
     function donate(uint256 amount) public {
         if (amount == 0) revert ZeroAmountNotAllowed();
         IERC20 betToken = IERC20(betTokenAddress);
         betToken.transferFrom(msg.sender, address(this), amount);
         poolPrize += amount;
-        emit DonationReceived(msg.sender, amount);
+        emit DonationReceived(msg.sender, amount, targetBlock);
     }
 
     // Places a bet on behalf of an account, only if the round is not yet closed and the bet is valid.
@@ -90,7 +114,7 @@ contract JackpotBlock is Ownable, Pausable {
         // Validation checks
         if (account == address(0)) revert AddressZero();
         if (block.number >= targetBlock) revert BetIsClosed();
-        if (_bet > maxBetValue) revert InvalidBetValue();
+        if (_bet > maxBetValue) revert InvalidValue();
         if (hasBet[targetBlock][_bet][account]) revert AlreadyBet();
 
         // Transfer tokens from bettor to contract
@@ -150,7 +174,7 @@ contract JackpotBlock is Ownable, Pausable {
         uint24 winningNumber = getWinningNumber(targetBlock);
         address[] memory winners = bets[targetBlock][winningNumber];
         if (winners.length > 0) {
-            uint256 winnerPrize = (poolPrize * FIRST_ROUND_WINNER_PERCENTAGE) / BASIS_POINTS;
+            uint256 winnerPrize = (poolPrize * first_winner_percentage) / BASIS_POINTS;
 
             // Distribute the prize
             distributePrizes(winners, winnerPrize);
@@ -158,14 +182,14 @@ contract JackpotBlock is Ownable, Pausable {
             // initialize the prize pool for the next round
             poolPrize = poolPrize - winnerPrize;
 
-            emit PrizeClaimed(1, winners.length, winnerPrize);
+            emit PrizeClaimed(1, winners.length, winnerPrize, targetBlock);
         } else {
             // second attempt with targetBlock + 1
             winningNumber = getWinningNumber(targetBlock + 1);
             winners = bets[targetBlock][winningNumber];
 
             if (winners.length > 0) {
-                uint256 winnerPrize = (poolPrize * SECOND_ROUND_WINNER_PERCENTAGE) / BASIS_POINTS;
+                uint256 winnerPrize = (poolPrize * second_winner_percentage) / BASIS_POINTS;
 
                 // Distribute the prize
                 distributePrizes(winners, winnerPrize);
@@ -173,7 +197,7 @@ contract JackpotBlock is Ownable, Pausable {
                 // initialize the prize pool for the next round
                 poolPrize = poolPrize - winnerPrize;
 
-                emit PrizeClaimed(2, winners.length, winnerPrize);
+                emit PrizeClaimed(2, winners.length, winnerPrize, targetBlock);
             }
         }
 
@@ -191,11 +215,17 @@ contract JackpotBlock is Ownable, Pausable {
 
     // Internal function to reset for the next round
     function resetForNextRound() internal {
+        uint256 prevTargetBlock = targetBlock;
+
         targetBlocksProcessed[targetBlock] = true;
-        targetBlock = block.number + blocksBetweenRound;
-        betPrice = betPriceForNextRound;
-        maxBetValue = maxBetValueForNextRound;
-        betFee = betFeeForNextRound;
+        targetBlock = block.number + blocksBetweenRounds;
+        betPrice = config.betPrice_nextRound;
+        maxBetValue = config.maxBetValue_nextRound;
+        betFee = config.betFee_nextRound;
+        first_winner_percentage = config.first_winner_percentage_nextRound;
+        second_winner_percentage = config.second_winner_percentage_nextRound;
+
+        emit NewRound(prevTargetBlock, targetBlock, config);
     }
 
     // Function to claim accumulated fees
@@ -204,6 +234,9 @@ contract JackpotBlock is Ownable, Pausable {
 
         IERC20 betToken = IERC20(betTokenAddress);
         betToken.transfer(feeCollector, totalFees);
+
+        emit feesClaimed(feeCollector, totalFees);
+
         totalFees = 0;
     }
 
@@ -216,12 +249,13 @@ contract JackpotBlock is Ownable, Pausable {
         // Reset the accumulated fees to zero
         totalFees = 0;
 
-        emit DonationReceived(address(this), totalFees);
+        emit DonationReceived(address(this), totalFees, targetBlock);
     }
 
     // Function to update the fee collector address
     function updateFeeCollector(address _feeCollector) public onlyOwner {
         feeCollector = _feeCollector;
+        emit newFeesCollector(_feeCollector);
     }
 
     // Define a getter function for the `bettors` array
@@ -229,28 +263,26 @@ contract JackpotBlock is Ownable, Pausable {
         return bets[_targetBlock][bet];
     }
 
-    // Function to get the current prices for the current round
-    function getCurrentPrices() public view returns (uint256, uint256) {
+    // Function to get the current prizes for the current round
+    function getCurrentPrizes() public view returns (uint256, uint256) {
         return (
-            (poolPrize * FIRST_ROUND_WINNER_PERCENTAGE) / BASIS_POINTS,
-            (poolPrize * SECOND_ROUND_WINNER_PERCENTAGE) / BASIS_POINTS
+            (poolPrize * first_winner_percentage) / BASIS_POINTS,
+            (poolPrize * second_winner_percentage) / BASIS_POINTS
         );
     }
 
     // Function to set the maximum bet value for the next round
-    function setNewConfig(
-        uint256 _maxBetValueForNextRound,
-        uint256 _betPriceForNextRound,
-        uint256 _betFeeForNextRound
-    ) public onlyOwner {
-        if (_maxBetValueForNextRound < 9 || _maxBetValueForNextRound > 99999) revert maxBetValueNotAllowed();
-        if (_betPriceForNextRound == 0) revert ZeroAmountNotAllowed();
-        if (_betFeeForNextRound > 50) revert InvalidBetValue();
+    function setNewConfig(Config memory _config) public onlyOwner {
+        if (_config.maxBetValue_nextRound < 9 || _config.maxBetValue_nextRound > 99999) revert InvalidValue();
+        if (_config.betPrice_nextRound == 0) revert ZeroAmountNotAllowed();
+        if (_config.betFee_nextRound > 500) revert InvalidValue();
+        if (_config.first_winner_percentage_nextRound < 5000 || _config.first_winner_percentage_nextRound > 10000)
+            revert InvalidValue();
+        if (_config.second_winner_percentage_nextRound < 2500 || _config.second_winner_percentage_nextRound > 10000)
+            revert InvalidValue();
 
-        maxBetValueForNextRound = _maxBetValueForNextRound;
-        betPriceForNextRound = _betPriceForNextRound;
-        betFeeForNextRound = _betFeeForNextRound;
+        config = _config;
 
-        emit newConfig(_maxBetValueForNextRound, _betPriceForNextRound, _betFeeForNextRound);
+        emit newConfig(_config);
     }
 }

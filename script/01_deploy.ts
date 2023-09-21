@@ -21,13 +21,13 @@ async function main(hre: HardhatRuntimeEnvironment) {
       //uint256 _blocksBetweenRound
       60,
       //uint256 _amountOfHashesToDetermineWinner
-      3,
+      5,
       //uint256 _maxBetValue
       99,
       //address _feeCollector
       "0xDe75665F3BE46D696e5579628fA17b662e6fC04e",
       //uint256 _betFee
-      10,
+      1000,
     ],
     deployer as any,
   );
